@@ -2,19 +2,15 @@
 """
 Core pipeline: STT → Gemini (native function calling) → Tool execution → TTS
 
-Key improvements over original:
-  - Uses Gemini's native function calling instead of regex JSON parsing.
-    The model returns a structured FunctionCall object — far more reliable.
-  - Removed manual history management. The Gemini chat object tracks its own
-    session history internally; sending it again was doubling the context.
-  - Responsibilities are split into focused methods, each doing one thing.
+Posts UI events at each stage so the HUD stays in sync:
+  IDLE → LISTENING → THINKING → (tool) → SPEAKING → IDLE
 """
 
 from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from google import genai
 from google.genai import types
@@ -23,8 +19,11 @@ from config import AppConfig
 from stt import SpeechToText
 from tts import TextToSpeech
 from ptt import PushToTalk
-import tools  # triggers auto-discovery of all tool modules
+import tools
 from tools import run_tool, get_tool_declarations
+
+if TYPE_CHECKING:
+    from ui import JarvisHUD, UIEvent
 
 
 @dataclass
@@ -34,19 +33,12 @@ class Turn:
 
 
 class JarvisApp:
-    """
-    Pipeline per turn:
-      1. listen()       — STT captures speech → text
-      2. think()        — send to Gemini; handle tool call if requested
-      3. speak()        — TTS plays the response
-    """
-
     EXIT_PHRASES = {"exit", "exit.", "quit", "quit.", "goodbye", "goodbye."}
 
-    def __init__(self, cfg: AppConfig):
+    def __init__(self, cfg: AppConfig, hud: Optional["JarvisHUD"] = None):
         self.cfg = cfg
+        self.hud = hud
 
-        # ── Gemini ────────────────────────────────────────────────────────────
         self.gemini_client = genai.Client(api_key=cfg.gemini_api_key)
         self.chat = self.gemini_client.chats.create(
             model=cfg.gemini_model,
@@ -57,7 +49,6 @@ class JarvisApp:
             ),
         )
 
-        # ── Speech ────────────────────────────────────────────────────────────
         self.stt = SpeechToText(model=cfg.stt_model, language=cfg.stt_language)
         self.tts = TextToSpeech(
             api_key=cfg.elevenlabs_api_key,
@@ -67,19 +58,28 @@ class JarvisApp:
             mpv_path=cfg.mpv_path,
         )
 
-        # ── Push-to-talk ──────────────────────────────────────────────────────
         self.ptt: Optional[PushToTalk] = None
         if cfg.ptt_enabled:
             self.ptt = PushToTalk(key_name=cfg.ptt_key)
             self.ptt.start()
             print(f"[PTT] Hold {cfg.ptt_key} to talk.")
 
+        self._post("status", "idle")
+
+    # ── UI bridge ─────────────────────────────────────────────────────────────
+
+    def _post(self, kind: str, value: str):
+        if self.hud is None:
+            return
+        from ui import UIEvent
+        self.hud.post(UIEvent(kind=kind, value=value))
+
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def run_turn(self) -> bool:
-        """Runs one listen → think → speak cycle. Returns False to exit."""
         user_text = self._listen()
         if not user_text.strip():
+            self._post("status", "idle")
             return True
 
         if user_text.lower().strip() in self.EXIT_PHRASES:
@@ -90,6 +90,7 @@ class JarvisApp:
         if response_text:
             self._speak(response_text)
 
+        self._post("status", "idle")
         return True
 
     # ── Pipeline steps ────────────────────────────────────────────────────────
@@ -99,16 +100,18 @@ class JarvisApp:
             print(f"\n[PTT] Hold {self.cfg.ptt_key} to talk...")
             self.ptt.wait_for_press()
 
+        self._post("status", "listening")
         print("You: ", end="", flush=True)
         text = self.stt.listen_text()
         print(text)
+
+        if text.strip():
+            self._post("user", text)
+
         return text
 
     def _think(self, user_text: str) -> str:
-        """
-        Send user text to Gemini. If the model requests a tool call,
-        execute it and send the result back for a final spoken response.
-        """
+        self._post("status", "thinking")
         print("Jarvis: ", end="", flush=True)
 
         try:
@@ -117,14 +120,13 @@ class JarvisApp:
             print(f"\n[Gemini error: {e}]", file=sys.stderr)
             return "Sorry, I had trouble reaching the AI service."
 
-        # ── Check for a function/tool call ────────────────────────────────────
         for part in response.candidates[0].content.parts:
             if part.function_call:
-                fn   = part.function_call
+                fn     = part.function_call
                 result = run_tool(fn.name, dict(fn.args))
                 print(f"[tool:{fn.name}] {result}")
+                self._post("tool", f"{fn.name} → {result}")
 
-                # Send tool result back so Gemini can form a spoken reply
                 tool_response = self.chat.send_message(
                     types.Part.from_function_response(
                         name=fn.name,
@@ -133,14 +135,17 @@ class JarvisApp:
                 )
                 spoken = (tool_response.text or "").strip()
                 print(spoken)
+                self._post("response", spoken)
                 return spoken
 
-        # ── Plain text response ───────────────────────────────────────────────
         spoken = (response.text or "").strip()
         print(spoken)
+        self._post("response", spoken)
+        self._post("tool", "—")
         return spoken
 
     def _speak(self, text: str) -> None:
+        self._post("status", "speaking")
         self.tts.speak(text)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
