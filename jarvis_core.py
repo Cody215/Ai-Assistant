@@ -2,13 +2,15 @@
 """
 Core pipeline: STT → Gemini (native function calling) → Tool execution → TTS
 
-Posts UI events at each stage so the HUD stays in sync:
-  IDLE → LISTENING → THINKING → (tool) → SPEAKING → IDLE
+Includes idle check-in timer: if the user is silent for cfg.idle_checkin_minutes,
+Jarvis generates and speaks an unprompted check-in line.
 """
 
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
@@ -38,7 +40,10 @@ class JarvisApp:
     def __init__(self, cfg: AppConfig, hud: Optional["JarvisHUD"] = None):
         self.cfg = cfg
         self.hud = hud
+        self._last_interaction = time.time()
+        self._shutdown_event   = threading.Event()
 
+        # ── Gemini ────────────────────────────────────────────────────────────
         self.gemini_client = genai.Client(api_key=cfg.gemini_api_key)
         self.chat = self.gemini_client.chats.create(
             model=cfg.gemini_model,
@@ -49,6 +54,7 @@ class JarvisApp:
             ),
         )
 
+        # ── Speech ────────────────────────────────────────────────────────────
         self.stt = SpeechToText(model=cfg.stt_model, language=cfg.stt_language)
         self.tts = TextToSpeech(
             api_key=cfg.elevenlabs_api_key,
@@ -58,11 +64,17 @@ class JarvisApp:
             mpv_path=cfg.mpv_path,
         )
 
+        # ── Push-to-talk ──────────────────────────────────────────────────────
         self.ptt: Optional[PushToTalk] = None
         if cfg.ptt_enabled:
             self.ptt = PushToTalk(key_name=cfg.ptt_key)
             self.ptt.start()
             print(f"[PTT] Hold {cfg.ptt_key} to talk.")
+
+        # ── Idle check-in timer ───────────────────────────────────────────────
+        if cfg.idle_checkin_minutes > 0:
+            t = threading.Thread(target=self._idle_watcher, daemon=True)
+            t.start()
 
         self._post("status", "idle")
 
@@ -73,6 +85,38 @@ class JarvisApp:
             return
         from ui import UIEvent
         self.hud.post(UIEvent(kind=kind, value=value))
+
+    # ── Idle check-in ─────────────────────────────────────────────────────────
+
+    def _idle_watcher(self):
+        """
+        Background thread. Fires a check-in if the user has been silent
+        for cfg.idle_checkin_minutes. Resets after each check-in so it
+        doesn't spam — waits the full interval again before the next one.
+        """
+        interval = self.cfg.idle_checkin_minutes * 60
+        while not self._shutdown_event.is_set():
+            time.sleep(15)  # check every 15 seconds
+            if self._shutdown_event.is_set():
+                break
+            elapsed = time.time() - self._last_interaction
+            if elapsed >= interval:
+                self._last_interaction = time.time()  # reset before speaking
+                self._do_checkin()
+
+    def _do_checkin(self):
+        """Ask Gemini for a check-in line and speak it."""
+        try:
+            response = self.chat.send_message("[IDLE_CHECKIN]")
+            line = (response.text or "").strip()
+            if line:
+                print(f"\nJarvis (check-in): {line}")
+                self._post("response", line)
+                self._post("status",   "speaking")
+                self.tts.speak(line)
+                self._post("status",   "idle")
+        except Exception as e:
+            print(f"[idle check-in error: {e}]", file=sys.stderr)
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -86,6 +130,7 @@ class JarvisApp:
             print("Ending session. Goodbye.")
             return False
 
+        self._last_interaction = time.time()
         response_text = self._think(user_text)
         if response_text:
             self._speak(response_text)
@@ -118,7 +163,7 @@ class JarvisApp:
             response = self.chat.send_message(user_text)
         except Exception as e:
             print(f"\n[Gemini error: {e}]", file=sys.stderr)
-            return "Sorry, I had trouble reaching the AI service."
+            return "Something went wrong on my end. Try again."
 
         for part in response.candidates[0].content.parts:
             if part.function_call:
@@ -151,6 +196,7 @@ class JarvisApp:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def shutdown(self):
+        self._shutdown_event.set()
         self.stt.shutdown()
         if self.ptt is not None:
             self.ptt.stop()
