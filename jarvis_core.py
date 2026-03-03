@@ -2,8 +2,9 @@
 """
 Core pipeline: STT → Gemini (native function calling) → Tool execution → TTS
 
-Includes idle check-in timer: if the user is silent for cfg.idle_checkin_minutes,
-Jarvis generates and speaks an unprompted check-in line.
+Memory is loaded at startup and injected into the system prompt.
+Facts are extracted after each turn in a background thread.
+Session summary is written on shutdown.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from config import AppConfig
 from stt import SpeechToText
 from tts import TextToSpeech
 from ptt import PushToTalk
+from memory.manager import MemoryManager
 import tools
 from tools import run_tool, get_tool_declarations
 
@@ -43,12 +45,26 @@ class JarvisApp:
         self._last_interaction = time.time()
         self._shutdown_event   = threading.Event()
 
-        # ── Gemini ────────────────────────────────────────────────────────────
+        # ── Gemini client ─────────────────────────────────────────────────────
         self.gemini_client = genai.Client(api_key=cfg.gemini_api_key)
+
+        # ── Memory ────────────────────────────────────────────────────────────
+        self.memory = MemoryManager(
+            memory_dir=cfg.memory_dir,
+            gemini_client=self.gemini_client,
+            gemini_model=cfg.gemini_model,
+        )
+        memory_context = self.memory.context_block()
+        fact_count     = self.memory.fact_count()
+        if fact_count > 0:
+            print(f"[Memory] Loaded {fact_count} facts from previous sessions.")
+
+        # ── Gemini chat (with memory injected) ───────────────────────────────
+        full_system_prompt = cfg.system_instruction + memory_context
         self.chat = self.gemini_client.chats.create(
             model=cfg.gemini_model,
             config=types.GenerateContentConfig(
-                system_instruction=cfg.system_instruction,
+                system_instruction=full_system_prompt,
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
                 tools=[types.Tool(function_declarations=get_tool_declarations())],
             ),
@@ -89,23 +105,16 @@ class JarvisApp:
     # ── Idle check-in ─────────────────────────────────────────────────────────
 
     def _idle_watcher(self):
-        """
-        Background thread. Fires a check-in if the user has been silent
-        for cfg.idle_checkin_minutes. Resets after each check-in so it
-        doesn't spam — waits the full interval again before the next one.
-        """
         interval = self.cfg.idle_checkin_minutes * 60
         while not self._shutdown_event.is_set():
-            time.sleep(15)  # check every 15 seconds
+            time.sleep(15)
             if self._shutdown_event.is_set():
                 break
-            elapsed = time.time() - self._last_interaction
-            if elapsed >= interval:
-                self._last_interaction = time.time()  # reset before speaking
+            if time.time() - self._last_interaction >= interval:
+                self._last_interaction = time.time()
                 self._do_checkin()
 
     def _do_checkin(self):
-        """Ask Gemini for a check-in line and speak it."""
         try:
             response = self.chat.send_message("[IDLE_CHECKIN]")
             line = (response.text or "").strip()
@@ -181,12 +190,22 @@ class JarvisApp:
                 spoken = (tool_response.text or "").strip()
                 print(spoken)
                 self._post("response", spoken)
+
+                # Save and process turn
+                self.memory.save_turn("user",   user_text)
+                self.memory.save_turn("jarvis", spoken)
+                self.memory.process_turn(user_text, spoken)
                 return spoken
 
         spoken = (response.text or "").strip()
         print(spoken)
         self._post("response", spoken)
         self._post("tool", "—")
+
+        # Save and process turn
+        self.memory.save_turn("user",   user_text)
+        self.memory.save_turn("jarvis", spoken)
+        self.memory.process_turn(user_text, spoken)
         return spoken
 
     def _speak(self, text: str) -> None:
@@ -197,6 +216,8 @@ class JarvisApp:
 
     def shutdown(self):
         self._shutdown_event.set()
+        print("[Memory] Writing session summary...")
+        self.memory.close(chat=self.chat)
         self.stt.shutdown()
         if self.ptt is not None:
             self.ptt.stop()
