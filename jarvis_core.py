@@ -2,9 +2,10 @@
 """
 Core pipeline: STT → Gemini (native function calling) → Tool execution → TTS
 
-Memory is loaded at startup and injected into the system prompt.
-Facts are extracted after each turn in a background thread.
-Session summary is written on shutdown.
+Wake word flow:
+  [Sleeping] → "Hey Jarvis" → greeting → PTT queries → "goodbye" → [Sleeping]
+
+If wake_word_enabled is False, PTT works as before with no wake word needed.
 """
 
 from __future__ import annotations
@@ -37,15 +38,19 @@ class Turn:
 
 
 class JarvisApp:
-    EXIT_PHRASES = {"exit", "exit.", "quit", "quit.", "goodbye", "goodbye."}
+    # When wake word is enabled, these send Jarvis back to sleep
+    SLEEP_PHRASES    = {"goodbye", "goodbye.", "go to sleep", "sleep", "that's all"}
+    # These always exit the program entirely, regardless of mode
+    SHUTDOWN_PHRASES = {"exit", "exit.", "quit", "quit.", "shut down", "shutdown"}
 
     def __init__(self, cfg: AppConfig, hud: Optional["JarvisHUD"] = None):
         self.cfg = cfg
         self.hud = hud
         self._last_interaction = time.time()
         self._shutdown_event   = threading.Event()
+        self._active           = not cfg.wake_word_enabled  # start active if no wake word
 
-        # ── Gemini client ─────────────────────────────────────────────────────
+        # ── Gemini ────────────────────────────────────────────────────────────
         self.gemini_client = genai.Client(api_key=cfg.gemini_api_key)
 
         # ── Memory ────────────────────────────────────────────────────────────
@@ -59,7 +64,7 @@ class JarvisApp:
         if fact_count > 0:
             print(f"[Memory] Loaded {fact_count} facts from previous sessions.")
 
-        # ── Gemini chat (with memory injected) ───────────────────────────────
+        # ── Gemini chat ───────────────────────────────────────────────────────
         full_system_prompt = cfg.system_instruction + memory_context
         self.chat = self.gemini_client.chats.create(
             model=cfg.gemini_model,
@@ -87,12 +92,30 @@ class JarvisApp:
             self.ptt.start()
             print(f"[PTT] Hold {cfg.ptt_key} to talk.")
 
+        # ── Wake word ─────────────────────────────────────────────────────────
+        self.wwd = None
+        if cfg.wake_word_enabled:
+            try:
+                from wake_word import WakeWordDetector
+                self.wwd = WakeWordDetector(
+                    threshold=cfg.wake_word_threshold,
+                    cooldown_s=cfg.wake_word_cooldown,
+                )
+                self.wwd.start()
+                print("[Wake Word] Listening for 'Hey Jarvis'...")
+                self._post("status", "sleeping")
+            except Exception as e:
+                print(f"[Wake Word] Failed to start: {e}. Falling back to PTT only.")
+                self.wwd = None
+                self._active = True
+
         # ── Idle check-in timer ───────────────────────────────────────────────
         if cfg.idle_checkin_minutes > 0:
             t = threading.Thread(target=self._idle_watcher, daemon=True)
             t.start()
 
-        self._post("status", "idle")
+        if self._active:
+            self._post("status", "idle")
 
     # ── UI bridge ─────────────────────────────────────────────────────────────
 
@@ -110,7 +133,8 @@ class JarvisApp:
             time.sleep(15)
             if self._shutdown_event.is_set():
                 break
-            if time.time() - self._last_interaction >= interval:
+            # Only check in when Jarvis is active, not sleeping
+            if self._active and time.time() - self._last_interaction >= interval:
                 self._last_interaction = time.time()
                 self._do_checkin()
 
@@ -127,17 +151,71 @@ class JarvisApp:
         except Exception as e:
             print(f"[idle check-in error: {e}]", file=sys.stderr)
 
+    # ── Wake word cycle ───────────────────────────────────────────────────────
+
+    def _sleep_until_wake(self):
+        """Block until the wake word fires, then greet and activate."""
+        print("\n[Sleeping] Say 'Hey Jarvis' to activate...")
+        self._post("status", "sleeping")
+        self._active = False
+
+        # Use a loop so KeyboardInterrupt (Ctrl+C) can interrupt the wait
+        while not self._shutdown_event.is_set():
+            if self.wwd._triggered.wait(timeout=0.5):
+                self.wwd._triggered.clear()
+                break
+        if self._shutdown_event.is_set():
+            return
+
+        self._active = True
+        self._last_interaction = time.time()
+        print("[Wake Word] Triggered — activating Jarvis.")
+        self._post("status", "idle")
+
+        # Generate a natural wake greeting
+        try:
+            response = self.chat.send_message("[WAKE_GREETING]")
+            greeting = (response.text or "").strip()
+            if not greeting:
+                greeting = "Ready."
+        except Exception:
+            greeting = "Ready."
+
+        print(f"Jarvis: {greeting}")
+        self._post("response", greeting)
+        self._speak(greeting)
+        self._post("status", "idle")
+
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def run_turn(self) -> bool:
+        # If wake word is enabled and we're not active, wait for it
+        if self.wwd is not None and not self._active:
+            self._sleep_until_wake()
+            return True
+
         user_text = self._listen()
         if not user_text.strip():
             self._post("status", "idle")
             return True
 
-        if user_text.lower().strip() in self.EXIT_PHRASES:
-            print("Ending session. Goodbye.")
+        phrase = user_text.lower().strip()
+
+        # Hard shutdown — always exits regardless of wake word mode
+        if phrase in self.SHUTDOWN_PHRASES:
+            print("Shutting down. Goodbye.")
             return False
+
+        # Sleep — only meaningful when wake word is enabled
+        if phrase in self.SLEEP_PHRASES:
+            if self.wwd is not None:
+                farewell = self._generate_farewell()
+                self._speak(farewell)
+                self._active = False
+                return True   # keep running, return to sleep
+            else:
+                print("Ending session. Goodbye.")
+                return False
 
         self._last_interaction = time.time()
         response_text = self._think(user_text)
@@ -146,6 +224,13 @@ class JarvisApp:
 
         self._post("status", "idle")
         return True
+
+    def _generate_farewell(self) -> str:
+        try:
+            response = self.chat.send_message("[SLEEP_FAREWELL]")
+            return (response.text or "Understood. Going quiet.").strip()
+        except Exception:
+            return "Going quiet."
 
     # ── Pipeline steps ────────────────────────────────────────────────────────
 
@@ -181,17 +266,24 @@ class JarvisApp:
                 print(f"[tool:{fn.name}] {result}")
                 self._post("tool", f"{fn.name} → {result}")
 
-                tool_response = self.chat.send_message(
-                    types.Part.from_function_response(
-                        name=fn.name,
-                        response={"result": result},
+                from tools.screen import get_pending_screenshot, clear_pending_screenshot
+                screenshot_b64 = get_pending_screenshot()
+
+                if screenshot_b64:
+                    clear_pending_screenshot()
+                    print("[Vision] Screenshot captured, routing to Ollama...")
+                    spoken = self._ask_with_image(user_text, screenshot_b64)
+                else:
+                    tool_response = self.chat.send_message(
+                        types.Part.from_function_response(
+                            name=fn.name,
+                            response={"result": result},
+                        )
                     )
-                )
-                spoken = (tool_response.text or "").strip()
+                    spoken = (tool_response.text or "").strip()
+
                 print(spoken)
                 self._post("response", spoken)
-
-                # Save and process turn
                 self.memory.save_turn("user",   user_text)
                 self.memory.save_turn("jarvis", spoken)
                 self.memory.process_turn(user_text, spoken)
@@ -201,12 +293,38 @@ class JarvisApp:
         print(spoken)
         self._post("response", spoken)
         self._post("tool", "—")
-
-        # Save and process turn
         self.memory.save_turn("user",   user_text)
         self.memory.save_turn("jarvis", spoken)
         self.memory.process_turn(user_text, spoken)
         return spoken
+
+    def _ask_with_image(self, user_text: str, image_b64: str) -> str:
+        try:
+            import ollama
+            prompt = (
+                f"You are Jarvis, a sharp and concise desktop voice assistant. "
+                f"The user asked: \"{user_text}\"\n\n"
+                f"Analyse what is visible on screen and respond naturally — "
+                f"concise, direct, under 60 words. "
+                f"If there is code, address it specifically. "
+                f"If there is an error, explain it plainly. "
+                f"Do not describe the screenshot literally unless asked."
+            )
+            print(f"[Vision] Sending to Ollama ({self.cfg.ollama_vision_model})...")
+            response = ollama.chat(
+                model=self.cfg.ollama_vision_model,
+                messages=[{
+                    "role":    "user",
+                    "content": prompt,
+                    "images":  [image_b64],
+                }],
+                options={"num_predict": 200},
+            )
+            return response["message"]["content"].strip()
+        except Exception as e:
+            if "connection" in str(e).lower() or "refused" in str(e).lower():
+                return f"Ollama isn't running. Start it and ensure '{self.cfg.ollama_vision_model}' is pulled."
+            return f"Screen analysis failed: {e}"
 
     def _speak(self, text: str) -> None:
         self._post("status", "speaking")
@@ -221,3 +339,5 @@ class JarvisApp:
         self.stt.shutdown()
         if self.ptt is not None:
             self.ptt.stop()
+        if self.wwd is not None:
+            self.wwd.stop()

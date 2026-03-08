@@ -1,20 +1,11 @@
 # main_ui.py
-"""
-Launches Jarvis with the HUD overlay.
-
-The Jarvis pipeline runs on a background thread.
-The HUD (tkinter) runs on the main thread — required on Windows.
-
-Use main.py instead if you want terminal-only mode.
-"""
-
 import threading
 from config import load_config
 from jarvis_core import JarvisApp
 from ui import JarvisHUD
 
 
-def _run_pipeline(app: JarvisApp):
+def _run_pipeline(app: JarvisApp, hud: JarvisHUD):
     try:
         while True:
             if not app.run_turn():
@@ -23,6 +14,11 @@ def _run_pipeline(app: JarvisApp):
         pass
     finally:
         app.shutdown()
+        # Close the HUD window cleanly from the pipeline thread
+        try:
+            hud._root.after(0, hud._root.destroy)
+        except Exception:
+            pass
 
 
 def main():
@@ -31,13 +27,10 @@ def main():
     hud = JarvisHUD()
     app = JarvisApp(cfg, hud=hud)
 
-    # Pipeline runs in background thread
-    t = threading.Thread(target=_run_pipeline, args=(app,), daemon=True)
+    t = threading.Thread(target=_run_pipeline, args=(app, hud), daemon=True)
     t.start()
 
-    print("HUD active. Close the overlay or say 'exit' to quit.\n")
-
-    # tkinter must run on the main thread
+    print("HUD active. Say 'exit' to quit or close the overlay.\n")
     hud.run()
 
 

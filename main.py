@@ -7,7 +7,7 @@ def main():
     print("Starting Jarvis...")
     cfg = load_config()
     app = JarvisApp(cfg)
-    print(f"Jarvis is ready. Say 'exit' or press Ctrl+C to quit.\n")
+    print("Jarvis is ready. Say 'exit' or press Ctrl+C to quit.\n")
 
     try:
         while True:
