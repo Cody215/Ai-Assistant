@@ -1,4 +1,13 @@
-# main.py
+"""
+Terminal entry point for Jarvis.
+
+Runs the pipeline in a simple loop on the main thread.
+No UI — use main_ui.py for the HUD overlay.
+
+Usage:
+    python main.py
+"""
+
 from config import load_config
 from jarvis_core import JarvisApp
 
@@ -16,6 +25,7 @@ def main():
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
+         # Always runs — writes session summary, closes DB, stops listeners
         app.shutdown()
 
 

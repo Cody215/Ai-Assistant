@@ -1,4 +1,18 @@
-# stt.py
+"""
+Speech-to-text via OpenAI Whisper using the RealtimeSTT library.
+
+Runs entirely locally — no API call, no internet required.
+
+Model sizes (trade-off between speed and accuracy):
+    tiny.en   — fastest, least accurate (~75MB)
+    base.en   — good balance, default (~150MB)
+    small.en  — more accurate, slower (~500MB)
+    medium.en — high accuracy, significantly slower (~1.5GB)
+
+VAD (Voice Activity Detection) settings are tuned for responsive
+turn-taking — short silence threshold and pre-recording buffer
+ensure Jarvis picks up speech quickly without clipping the start.
+"""
 from RealtimeSTT import AudioToTextRecorder
 
 

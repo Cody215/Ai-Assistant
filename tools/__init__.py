@@ -2,10 +2,34 @@
 """
 Tool registry with auto-discovery.
 
+On import, this module scans the tools/ directory and imports every .py
+file it finds (except __init__.py). Each file registers its tools using
+the @register_tool decorator, which:
+  1. Stores the handler function in _HANDLERS (name → callable)
+  2. Builds a Gemini FunctionDeclaration and appends it to _DECLARATIONS
+
+jarvis_core passes _DECLARATIONS to Gemini at startup so the model knows
+what tools are available. When Gemini returns a FunctionCall, jarvis_core
+calls run_tool(name, args) which looks up and executes the handler.
+
 To add a new tool:
-  1. Create a new .py file in this folder (e.g. tools/calendar.py)
-  2. Define your function and decorate it with @register_tool(...)
-  3. That's it — it will be picked up automatically on startup.
+1. Create a new .py file in tools/ (e.g. tools/calendar.py)
+2. Import register_tool and schema from tools
+3. Decorate your function:
+
+    @register_tool(
+        name="my_tool",
+        description="What this tool does — shown to Gemini.",
+        parameters=schema(
+            required_arg="Description of this argument",
+            optional_arg="optional: description of optional argument",
+        ),
+    )
+    def my_tool(args: dict) -> str:
+        value = args.get("required_arg", "")
+        return f"Result: {value}"
+
+4. Restart Jarvis — the tool is automatically discovered and registered.
 
 Each tool file is self-contained: its name, description, parameters,
 and Gemini function declaration all live together in one place.
@@ -35,20 +59,11 @@ def register_tool(
     """
     Decorator that registers a function as a Jarvis tool.
 
-    Args:
-        name:        Tool name Gemini will call (snake_case).
-        description: What the tool does (shown to the model).
-        parameters:  JSON-Schema dict describing the args.
-                     Use the helper schema() below to build it easily.
+    Builds a Gemini FunctionDeclaration from the parameters dict
+    so the model knows the tool's name, purpose, and argument types.
 
-    Example:
-        @register_tool(
-            name="get_time",
-            description="Get the current local time.",
-            parameters=schema(zone=("string", "IANA timezone, optional")),
-        )
-        def get_time(args):
-            ...
+    Parameters marked with descriptions starting with "optional"
+    are excluded from the required fields list.
     """
     def decorator(fn: Callable[[Dict[str, Any]], str]):
         _HANDLERS[name] = fn
@@ -76,11 +91,10 @@ def register_tool(
 def schema(**fields: str) -> Dict[str, str]:
     """
     Shorthand for building parameter dicts.
-    Mark optional fields by starting the description with 'optional'.
 
-    Example:
+    Usage:
         schema(
-            query="Search query",
+            query="The search query",
             engine="optional: google | duckduckgo | bing",
         )
     """
@@ -88,6 +102,10 @@ def schema(**fields: str) -> Dict[str, str]:
 
 
 def run_tool(name: str, args: Dict[str, Any]) -> str:
+    """
+    Execute a registered tool by name with the given args.
+    Always returns a string — never raises.
+    """
     handler = _HANDLERS.get(name)
     if not handler:
         return f"[Tool '{name}' not found]"

@@ -1,11 +1,24 @@
 # jarvis_core.py
 """
-Core pipeline: STT → Gemini (native function calling) → Tool execution → TTS
+Core pipeline orchestrator for Jarvis.
 
-Wake word flow:
-  [Sleeping] → "Hey Jarvis" → greeting → PTT queries → "goodbye" → [Sleeping]
+Pipeline per turn:
+    _listen()  — STT captures speech → text (waits for PTT or wake word)
+    _think()   — sends text to Gemini; handles tool calls if requested
+    _speak()   — TTS plays the response via ElevenLabs → mpv
 
-If wake_word_enabled is False, PTT works as before with no wake word needed.
+Additional responsibilities:
+    - Injects persistent memory context into the system prompt at startup
+    - Posts UI status events to the HUD at each pipeline stage
+    - Runs an idle check-in timer on a background thread
+    - Manages the wake word sleep/active cycle
+    - Writes session summary and closes memory on shutdown
+
+Wake word flow (when wake_word_enabled = True):
+    [Sleeping] → "Hey Jarvis" → greeting → PTT queries → "goodbye" → [Sleeping]
+
+Without wake word:
+    PTT only — hold F9 to talk, any time.
 """
 
 from __future__ import annotations

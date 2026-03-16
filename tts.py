@@ -1,13 +1,23 @@
-# tts.py
 """
-Text-to-speech via ElevenLabs, streamed directly into mpv for low-latency playback.
+Text-to-speech via ElevenLabs, piped directly into mpv for low-latency playback.
 
-Why mpv instead of ElevenLabs' built-in stream() ?
-  The built-in stream() routes audio through Python's sounddevice/soundfile stack,
-  which can introduce 20-40s of buffering on some Windows setups. mpv reads from
-  stdin and starts playing within ~200ms of receiving the first audio chunk.
+Why mpv instead of ElevenLabs' built-in stream():
+    ElevenLabs' stream() routes audio through Python's sounddevice/soundfile
+    stack. On some Windows setups this introduces 20-40 seconds of buffering
+    before audio starts. mpv reads from stdin and begins playback within
+    ~200ms of receiving the first audio chunk, making voice responses feel
+    immediate.
+
+Fallback:
+    If mpv is not found, falls back to ElevenLabs' built-in player
+    automatically — degraded latency but still functional.
+
+mpv flags used:
+    --no-cache        don't buffer — play as data arrives
+    --no-terminal     suppress mpv's progress bar in the console
+    --audio-display=no  don't attempt to open a video window
+    -                 read audio from stdin
 """
-
 from __future__ import annotations
 
 import subprocess
@@ -57,11 +67,11 @@ class TextToSpeech:
         """
         cmd = [
             self.mpv_path,
-            "--no-cache",           # don't buffer — play as data arrives
-            "--no-terminal",        # suppress mpv's status bar in the console
+            "--no-cache", 
+            "--no-terminal", 
             "--volume=100",
-            "--audio-display=no",   # don't try to open a window
-            "-",                    # read from stdin
+            "--audio-display=no",
+            "-",
         ]
 
         try:

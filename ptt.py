@@ -1,4 +1,16 @@
-# ptt.py
+"""
+Push-to-talk key listener using pynput.
+
+Runs a background keyboard listener thread. When the configured key
+is pressed, a threading.Event is set — jarvis_core waits on this event
+before starting STT capture.
+
+Supported keys: F8, F9, F10, ALT_R/L, CTRL_R/L, SHIFT_R/L, SPACE, ENTER, TAB
+Default: F9
+
+To change the key, update ptt_key in config.py.
+"""
+
 from __future__ import annotations
 
 import threading
