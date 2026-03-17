@@ -10,11 +10,11 @@ Built with Gemini 2.5 Flash, ElevenLabs, and Whisper.
 
 **Voice** — Wake word activation ("Hey Jarvis"), push-to-talk input (F9), local Whisper speech recognition, and ElevenLabs voice output streamed through mpv for near-instant audio playback.
 
-**Desktop control** — Open applications, create and open files, draft emails locally(no sending yet, but saves them nicely), search the web across Google, DuckDuckGo, or Bing, and play music via Spotify or local files.
+**Desktop control** — Open applications, create and open files, draft emails locally (no sending yet, but saves them nicely), search the web across Google, DuckDuckGo, or Bing, and play music via Spotify or local files.
 
 **System awareness** — Read and set volume, check battery status, get CPU/RAM/disk usage with automatic warnings when things look critical.
 
-**Screen analysis** — Ask Jarvis what's on your screen and it captures a screenshot and analyses it using a local Ollama vision model. Nothing is sent to external servers.
+**Screen analysis** — Ask Jarvis what's on your screen and it captures a screenshot and analyses it using a local Ollama vision model. No data is sent to external servers.
 
 **Persistent memory** — Conversations are logged to SQLite, facts about you are stored in ChromaDB as vector embeddings, and both are injected into the system prompt at startup. Jarvis starts each session already knowing things.
 
@@ -30,15 +30,15 @@ The pipeline is straightforward: wake word or PTT triggers STT, the transcribed 
 
 A few decisions worth explaining:
 
-**Choice of Model** — OpenAi's Gemini was consider as a viable option for the project. Gemini was one of the few models to give a free tier and usage to test and develop, alongside with fast processing, low latency and easy API setup. Whisper was chosen for its free and unlimite private use, with easy integration. 
+**Choice of Model** — Gemini was considered as a viable option for the project. Gemini was one of the few models to give a free tier and usage to test and develop, alongside fast processing, low latency and easy API setup. Whisper was chosen for its free and unlimited private use, with easy integration. 
 
 **Native function calling** — Gemini receives tool definitions as structured `FunctionDeclaration` objects and returns typed `FunctionCall` objects. No regex parsing of JSON in text responses, which was the original approach and was brittle and prone to false positives.
 
-**Plugin tool registry** — Every tool lives in its own file in `tools/`. A `@register_tool` decorator handles both registration and building the Gemini declaration. Drop a new file in the folder, restart, it works. No wiring required.
+**Plugin tool registry** — Every tool lives in its own file in `tools/`. A `@register_tool` decorator handles both registration and building the Gemini declaration. Drop a new file in the folder, restart, and it works. No wiring required.
 
 **Local screen analysis** — Screenshots go to a local Ollama vision model (llava), not Gemini. The image never leaves your machine. This was chosen to have a bit more privacy and control over what's analysed on your screen.
 
-**Use of Elevenlabs and mpv** - Realistic text-to-speech with customisable voice and easy to install API. During development, Elevenlabs streaming would take a extensive amount of time. This issue was fixed with mpv which drasticly dropped the delay.
+**Use of Elevenlabs and mpv** - Realistic text-to-speech with customisable voice and easy to install API. During development, Elevenlabs streaming would take an extensive amount of time. This issue was fixed with mpv which drastically dropped the delay.
 
 **Hybrid memory** — SQLite is used for structured history and session summaries while ChromaDB is for semantic retrieval of facts. After each exchange a background call extracts anything worth remembering and stores it without blocking the pipeline.
 
