@@ -1,359 +1,130 @@
 # J.A.R.V.I.S
 
-A voice-driven AI desktop assistant powered by Gemini 2.5 Flash and ElevenLabs, with local speech recognition, persistent memory, screen analysis, and a floating HUD overlay.
+A voice-driven AI desktop assistant. Say "Hey Jarvis" to wake it up, push-to-talk input, and it responds in voice while taking real actions on your computer — opening apps, searching the web, checking your system, playing music, analysing your screen, and more.
 
-> Say "Hey Jarvis" to wake it. Hold F9 to talk. It remembers you between sessions.
-
----
-
-## Overview
-
-Jarvis is a voice-first AI assistant that runs on your Windows machine. Speak naturally and jarvis listens, responds in voice, and executes real actions on your computer: opening applications, searching the web, checking system status, playing music, managing files, analysing your screen, and more.
-
-The project is built around four engineering priorities: a **modular tool system** that makes adding new capabilities trivial, **native LLM function calling** for reliable tool dispatch, **hybrid memory** that persists across sessions, and a **tiered model architecture** that routes sensitive operations like screen analysis to a local model rather than the cloud.
+Built with Gemini 2.5 Flash, ElevenLabs, and Whisper.
 
 ---
 
-## Demo
+## What it can do
 
-> *(Screenshot or GIF of the HUD overlay in action)*
+**Voice** — Wake word activation ("Hey Jarvis"), push-to-talk input (F9), local Whisper speech recognition, and ElevenLabs voice output streamed through mpv for near-instant audio playback.
 
-The floating HUD displays live pipeline state — LISTENING, PROCESSING, RESPONDING — alongside what you said, Jarvis's reply, and the last action taken. It sits above all other windows and can be dragged anywhere on screen.
+**Desktop control** — Open applications, create and open files, draft emails locally(no sending yet, but saves them nicely), search the web across Google, DuckDuckGo, or Bing, and play music via Spotify or local files.
 
----
+**System awareness** — Read and set volume, check battery status, get CPU/RAM/disk usage with automatic warnings when things look critical.
 
-## Features
+**Screen analysis** — Ask Jarvis what's on your screen and it captures a screenshot and analyses it using a local Ollama vision model. Nothing is sent to external servers.
 
-**Voice I/O**
-- Wake word activation — say "Hey Jarvis" to wake from sleep, "goodbye" to return
-- Push-to-talk input via configurable hotkey (default: F9)
-- Speech-to-text via OpenAI Whisper — runs locally, no API call
-- Text-to-speech via ElevenLabs, streamed directly into mpv for sub-300ms audio start
+**Persistent memory** — Conversations are logged to SQLite, facts about you are stored in ChromaDB as vector embeddings, and both are injected into the system prompt at startup. Jarvis starts each session already knowing things.
 
-**Desktop Control**
-- Open applications (Chrome, VSCode, Notepad, Calculator, Word, Outlook, and more)
-- Create and open files on the filesystem
-- Draft and save email templates locally
-- Web search via Google, DuckDuckGo, or Bing
+**Floating HUD** — An always-on-top overlay with an animated status ring showing what Jarvis is doing in real time.
 
-**Media**
-- Play music via Spotify (opens app or web) or local files with fuzzy filename matching
-
-**System Awareness**
-- Read and set system volume, mute/unmute
-- Battery percentage, charging state, and estimated time remaining, low battery warning voiced as a reminder
-- CPU, RAM, and disk usage — brief or detailed on request
-
-**Time & Weather**
-- Current time and date with full timezone support (IANA format)
-- Live weather via Open-Meteo API — no key required
-
-**Screen Analysis**
-- "What's on my screen?" — captures a full screenshot and analyses it locally
-- Processed by a local Ollama vision model (llava) — nothing sent to external servers
-- Works for code review, error messages, general screen description
-
-**Persistent Memory**
-- Every session logged to SQLite: conversation turns and a written summary
-- Facts about you extracted automatically after each exchange via Gemini
-- Facts stored in ChromaDB as vector embeddings for semantic retrieval
-
-**Floating HUD**
-- Always-on-top overlay, draggable, semi-transparent
-- Animated status ring — STANDBY / LISTENING / PROCESSING / RESPONDING / SLEEPING
-- Real-time display of speech input, Jarvis's response, and last tool used
-
-**Character**
-- Dry wit, calm confidence, quiet loyalty — Alfred meets JARVIS
-- Idle check-in timer — speaks naturally after a configurable period of silence
-- Uses memory to inform personality without announcing it
+**Character** — Dry, calm, quietly competent. Varied greetings, idle check-ins after silence, and memory that informs responses naturally without announcing itself.
 
 ---
 
 ## Architecture
 
-```
-                    ┌─────────────┐
-                    │   main_ui   │  ← entry point (HUD mode)
-                    │   main      │  ← entry point (terminal mode)
-                    └──────┬──────┘
-                           │
-                    ┌──────▼──────┐
-                    │ jarvis_core │  ← pipeline orchestrator
-                    └──┬───┬───┬──┘
-                       │   │   │
-          ┌────────────┘   │   └────────────┐
-          │                │                │
-   ┌──────▼──────┐  ┌──────▼──────┐  ┌──────▼──────┐
-   │  Wake Word  │  │   Gemini    │  │     TTS     │
-   │   + PTT     │  │  2.5 Flash  │  │ (ElevenLabs │
-   │  (local)    │  │  function   │  │  → mpv)     │
-   └─────────────┘  │  calling    │  └─────────────┘
-                    └──────┬──────┘
-                           │ tool call?
-                    ┌──────▼──────┐
-                    │    tools/   │  ← auto-discovered plugin registry
-                    └──┬──────────┘
-                       │
-        ┌──────────────┼──────────────┬──────────────┐
-        │              │              │               │
-   ┌────▼────┐   ┌─────▼────┐  ┌─────▼────┐  ┌──────▼────┐
-   │  apps   │   │  system  │  │  screen  │  │  files    │  ...
-   └─────────┘   └──────────┘  └────┬─────┘  └───────────┘
-                                    │ image only
-                             ┌──────▼──────┐
-                             │   Ollama    │  ← local vision model
-                             │   (llava)   │  ← screen stays on machine
-                             └─────────────┘
+The pipeline is straightforward: wake word or PTT triggers STT, the transcribed text goes to Gemini, Gemini either responds directly or calls a tool, the result comes back as voice via ElevenLabs and mpv.
 
-                    ┌──────▼──────┐
-                    │   memory/   │
-                    │  manager    │
-                    └──┬──────────┘
-                       │
-          ┌────────────┴────────────┐
-          │                         │
-   ┌──────▼──────┐           ┌──────▼──────┐
-   │   SQLite    │           │  ChromaDB   │
-   │  (history + │           │  (semantic  │
-   │  summaries) │           │   facts)    │
-   └─────────────┘           └─────────────┘
-```
+A few decisions worth explaining:
 
-### Key Design Decisions
+**Choice of Model** — OpenAi's Gemini was consider as a viable option for the project. Gemini was one of the few models to give a free tier and usage to test and develop, alongside with fast processing, low latency and easy API setup. Whisper was chosen for its free and unlimite private use, with easy integration. 
 
-**Native function calling over regex parsing**
-Earlier iterations detected tool requests by scanning Gemini's text output for JSON patterns with regex — brittle and prone to false positives. The current implementation passes tool definitions as structured `FunctionDeclaration` objects via the Gemini SDK. The model returns a typed `FunctionCall` object, eliminating an entire class of parsing bugs and making tool dispatch fully reliable.
+**Native function calling** — Gemini receives tool definitions as structured `FunctionDeclaration` objects and returns typed `FunctionCall` objects. No regex parsing of JSON in text responses, which was the original approach and was brittle and prone to false positives.
 
-**Plugin-based tool registry with auto-discovery**
-Each tool lives in its own file in `tools/`. A `@register_tool` decorator registers the handler and builds the Gemini `FunctionDeclaration` simultaneously. On startup, `tools/__init__.py` scans the directory and imports every module automatically. Adding a new tool means creating one file — no wiring, no changes elsewhere.
+**Plugin tool registry** — Every tool lives in its own file in `tools/`. A `@register_tool` decorator handles both registration and building the Gemini declaration. Drop a new file in the folder, restart, it works. No wiring required.
 
-**mpv for TTS audio**
-ElevenLabs' built-in `stream()` function on some Windows setups introduces 20-40 seconds of audio buffering. The current implementation pipes the ElevenLabs stream directly into mpv's stdin. mpv begins playback within ~200ms of the first chunk, making voice responses feel immediate.
+**Local screen analysis** — Screenshots go to a local Ollama vision model (llava), not Gemini. The image never leaves your machine. This was chosen to have a bit more privacy and control over what's analysed on your screen.
 
-**Hybrid memory: SQLite + ChromaDB**
-SQLite stores time-ordered data: conversation turns, session records, written summaries. ChromaDB stores semantic facts about the user as vector embeddings, retrieved by meaning rather than keyword. After each exchange, a background Gemini call extracts memorable facts without blocking the pipeline. At session start, both stores are queried and the results injected into the system prompt.
+**Use of Elevenlabs and mpv** - Realistic text-to-speech with customisable voice and easy to install API. During development, Elevenlabs streaming would take a extensive amount of time. This issue was fixed with mpv which drasticly dropped the delay.
 
-**Local screen analysis via Ollama**
-Screen analysis is privacy-sensitive — screenshots should not be sent to external APIs. When `capture_screen` is triggered, the screenshot is processed by a local Ollama vision model (llava). The image never leaves the machine. Gemini handles all other inference; Ollama handles vision only.
+**Hybrid memory** — SQLite is used for structured history and session summaries while ChromaDB is for semantic retrieval of facts. After each exchange a background call extracts anything worth remembering and stores it without blocking the pipeline.
 
-**Threading model**
-The pipeline (STT → LLM → TTS) runs on a background thread. tkinter must run on the main thread on Windows. A `queue.Queue` bridges the two — the pipeline posts status events into the queue, and the HUD polls it every 50ms via `root.after()`, keeping the UI responsive without shared mutable state.
-
----
-
-## Project Structure
-
-```
-jarvis/
-│
-├── main.py               # Entry point — terminal mode
-├── main_ui.py            # Entry point — HUD mode
-├── jarvis_core.py        # Pipeline orchestrator: listen → think → speak
-├── config.py             # All settings and system prompt / personality
-├── stt.py                # Whisper speech-to-text (RealtimeSTT)
-├── tts.py                # ElevenLabs TTS → mpv audio stream
-├── ptt.py                # Push-to-talk key listener (pynput)
-├── wake_word.py          # Wake word detector (openwakeword)
-├── ui.py                 # Floating HUD overlay (tkinter)
-│
-├── tools/
-│   ├── __init__.py       # Auto-discovery registry + @register_tool decorator
-│   ├── apps.py           # open_app
-│   ├── files.py          # create_file, open_file, draft_email
-│   ├── web.py            # web_search
-│   ├── music.py          # play_music (Spotify + local)
-│   ├── datetime_tools.py # get_time, get_date, get_weather
-│   ├── system.py         # get_volume, set_volume, get_battery, get_system_status
-│   └── screen.py         # capture_screen → routed to local Ollama vision
-│
-├── memory/
-│   ├── __init__.py
-│   ├── db.py             # SQLite: turns, sessions, profile
-│   ├── store.py          # ChromaDB: semantic fact storage and retrieval
-│   ├── manager.py        # Coordinator: context injection, extraction, summarisation
-│   ├── view.py           # CLI viewer: inspect stored facts, summaries, history
-│   └── reset.py          # CLI tool: wipe memory selectively or entirely
-│
-├── tests/
-│   ├── conftest.py       # Shared pytest configuration
-│   ├── test_tools.py     # Tool registry, individual tool logic
-│   ├── test_memory_db.py # SQLite turns, sessions, profile
-│   ├── test_memory_store.py # ChromaDB fact storage and retrieval
-│   ├── test_config.py    # Config validation and defaults
-│   └── test_ptt.py       # Key mapping and PTT initialisation
-│
-└── memory_data/          # Auto-created on first run — add to .gitignore
-    ├── jarvis.db         # SQLite database
-    └── chroma/           # ChromaDB vector store
-```
+**Threading** — The pipeline runs on a background thread. tkinter (the HUD) must run on the main thread on Windows. A queue bridges them and the pipeline posts status events, the HUD polls every 50ms.
 
 ---
 
 ## Setup
 
-### Prerequisites
-
-- Python 3.10+
-- Windows 10 or later
-- [mpv](https://mpv.io/) — place `mpv.exe` in the project root or add to PATH
-- [Ollama](https://ollama.com/) — for local screen analysis
-- A Gemini API key — [Google AI Studio](https://aistudio.google.com/)
-- An ElevenLabs API key — [ElevenLabs](https://elevenlabs.io/)
-
-### Install dependencies
+**Prerequisites:** Python 3.10+, Windows, [mpv](https://mpv.io/) on PATH, [Ollama](https://ollama.com/) installed.
 
 ```bash
+# Install dependencies
 pip install google-genai elevenlabs RealtimeSTT pynput psutil pycaw comtypes \
             requests chromadb python-dotenv pillow ollama openwakeword sounddevice
-```
 
-### Pull the Ollama vision model
-
-```bash
+# Pull the vision model
 ollama pull llava
-# Or for a lighter/faster option:
-ollama pull moondream
 ```
 
-### Environment variables
-
-Create a `.env` file in the project root:
+Create a `.env` in the project root:
 
 ```
-GEMINI_API_KEY=your_gemini_key_here
-ELEVENLABS_API_KEY=your_elevenlabs_key_here
+GEMINI_API_KEY=your_key_here
+ELEVENLABS_API_KEY=your_key_here
 ```
-
-### Run
 
 ```bash
-# Terminal mode
-python main.py
-
-# With HUD overlay
-python main_ui.py
+python main.py        # terminal mode
+python main_ui.py     # with HUD overlay
 ```
 
-**Wake word disabled by default.** To enable, set `wake_word_enabled: bool = True` in `config.py`.
-
-Default PTT key is **F9**. Say **"exit"** or **"shut down"** to close. Say **"goodbye"** to return to sleep (wake word mode).
+Wake word is off by default — enable it with `wake_word_enabled = True` in `config.py`. Say **"exit"** or **"shut down"** to close, **"goodbye"** to sleep.
 
 ---
 
-## Adding a New Tool
+## Adding a tool
 
-Drop a file in `tools/` — it's automatically discovered on next startup:
+Create a file in `tools/` — auto-discovered on next startup:
 
 ```python
 # tools/my_tool.py
 from tools import register_tool, schema
 
 @register_tool(
-    name="do_something",
-    description="What this tool does — shown to Gemini to decide when to use it.",
+    name="my_tool",
+    description="What this does — Gemini reads this to decide when to use it.",
     parameters=schema(
-        input_text="The text to process",
-        mode="optional: fast | thorough (default: fast)",
+        input="What the user wants",
+        mode="optional: fast | thorough",
     ),
 )
-def do_something(args):
-    text = args.get("input_text", "")
-    mode = args.get("mode", "fast")
-    # your logic here
-    return "Result as a string."
-```
-
-No wiring, no registration step, no changes to any other file.
-
----
-
-## Memory Management
-
-```bash
-# View everything Jarvis has stored
-python memory/view.py
-
-# View specific sections
-python memory/view.py --facts        # stored facts about you
-python memory/view.py --summaries    # session summaries
-python memory/view.py --history      # last 10 conversation turns
-python memory/view.py --history 30   # last 30 turns
-
-# Clear memory
-python memory/reset.py               # wipe everything (prompts for confirmation)
-python memory/reset.py --facts       # wipe ChromaDB facts only
-python memory/reset.py --history     # wipe SQLite history only
+def my_tool(args):
+    return "result as a string"
 ```
 
 ---
 
-## Running Tests
+## Tests
 
 ```bash
 pip install pytest pytest-mock
 pytest tests/ -v
 ```
 
-Tests cover: tool registry, web search URL construction, datetime output, battery states, system status warnings, file creation, screenshot capture, SQLite turns/sessions/profile, ChromaDB storage/deduplication/retrieval, config validation, and PTT key mapping. Hardware, APIs, and audio are excluded from automated tests.
-
----
-
-## Configuration
-
-All settings live in `config.py` under `AppConfig`:
-
-| Setting | Default | Description |
-|---|---|---|
-| `gemini_model` | `gemini-2.5-flash` | Gemini model — swap to `gemini-2.5-flash-lite` if rate limited |
-| `stt_model` | `base.en` | Whisper model size (tiny/base/small/medium) |
-| `ptt_key` | `F9` | Push-to-talk hotkey |
-| `wake_word_enabled` | `False` | Enable wake word mode |
-| `wake_word_threshold` | `0.55` | Detection confidence threshold (0.0–1.0) |
-| `idle_checkin_minutes` | `5` | Minutes before Jarvis checks in unprompted (0 = off) |
-| `memory_dir` | `memory_data/` | Where SQLite and ChromaDB data live |
-| `mpv_path` | `mpv.exe` | Path to mpv executable |
-| `ollama_vision_model` | `llava` | Local vision model for screen analysis |
-| `ollama_host` | `http://localhost:11434` | Ollama server address |
-| `default_timezone` | `Australia/Sydney` | Fallback timezone |
-
----
-
-## Tech Stack
-
-| Component | Technology | Why |
-|---|---|---|
-| LLM | Gemini 2.5 Flash | Fast inference, large context, reliable native function calling |
-| STT | Whisper via RealtimeSTT | Runs fully locally, no API cost, tunable VAD |
-| TTS | ElevenLabs Flash v2.5 | Natural voice with streaming support |
-| Audio playback | mpv | Sub-300ms start via stdin piping, bypasses Python audio stack |
-| Tool calling | Gemini FunctionDeclaration API | Structured and typed — no regex parsing |
-| Wake word | openwakeword | Runs locally, low CPU, "hey jarvis" preset available |
-| Vision (screen) | Ollama + llava | Local processing — screenshots never leave the machine |
-| Conversation memory | SQLite (built-in) | Zero-dependency structured storage |
-| Semantic memory | ChromaDB | Local vector store, pip install only, no server |
-| HUD | tkinter (built-in) | No extra dependency, sufficient for overlay UI |
-| PTT | pynput | Cross-platform key listener |
-| System tools | psutil + pycaw | Reliable Windows audio and system metrics |
-| Weather | Open-Meteo API | Free, no API key, geocoding included |
-
----
-
-## Roadmap
-
-- [ ] Tiered model routing — Ollama for simple tasks, Gemini for complex reasoning
-- [ ] PyWebView UI — replace tkinter HUD with full HTML/CSS/JS interface
-- [ ] Expanded file management — search, move, delete across filesystem
+Covers tool registry, memory database, ChromaDB store, config validation, and PTT key mapping. Hardware and APIs are excluded.
 
 ---
 
 ## Notes
 
-- `memory_data/` is auto-created on first run. Add it to `.gitignore` — it contains personal conversation data.
-- Gemini free tier has daily rate limits. On a 429 error, switch `gemini_model` to `gemini-2.5-flash-lite` or wait for the daily reset.
-- mpv must be accessible — place `mpv.exe` in the project root or set `mpv_path` in config to its full path. Falls back to ElevenLabs' built-in player if not found.
-- Wake word requires `openwakeword` and `sounddevice`. Disabled by default — enable in `config.py`.
+- `memory_data/` is created automatically. Add it to `.gitignore` — it contains personal session data.
+- On a Gemini 429 rate limit, switch to `gemini-2.5-flash-lite` in `config.py` or wait for the daily reset.
+- Screen analysis takes ~10 seconds on CPU. Switch to `moondream` in config for a faster but lighter model.
+- Memory can be inspected with `python memory/view.py` and cleared with `python memory/reset.py`.
 
 ---
 
-*A personal project exploring voice interface design, modular AI architecture, and the engineering trade-offs between cloud and local inference.*
+## Roadmap
+
+- Tiered model routing — Ollama for simple tasks, Gemini for complex ones
+- PyWebView UI — replace tkinter with a proper HTML/CSS interface
+- Browser automation via Playwright
+- Reminders and time-based alerts
+- Potential rename of the project
+
+---
+
+*Personal project — exploring voice interfaces, modular AI architecture, and local vs cloud inference trade-offs.*
