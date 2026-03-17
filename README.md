@@ -97,17 +97,6 @@ def my_tool(args):
 
 ---
 
-## Tests
-
-```bash
-pip install pytest pytest-mock
-pytest tests/ -v
-```
-
-Covers tool registry, memory database, ChromaDB store, config validation, and PTT key mapping. Hardware and APIs are excluded.
-
----
-
 ## Notes
 
 - `memory_data/` is created automatically. Add it to `.gitignore` — it contains personal session data.
