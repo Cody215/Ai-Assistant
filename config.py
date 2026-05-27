@@ -112,6 +112,7 @@ class AppConfig:
     # Install: ollama pull llava  (or llava-phi3 for lighter/faster)
     ollama_vision_model: str = "llava"
     ollama_host: str         = "http://localhost:11434"
+    ollama_text_model: str = "phi3:mini"
 
     # Wake word detection (openwakeword)
     # Flow: "Hey Jarvis" wakes Jarvis 2192 PTT handles each query 2192 "goodbye" sleeps

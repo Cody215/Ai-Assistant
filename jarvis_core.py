@@ -39,6 +39,7 @@ from ptt import PushToTalk
 from memory.manager import MemoryManager
 import tools
 from tools import run_tool, get_tool_declarations
+from router import Router
 
 if TYPE_CHECKING:
     from ui import JarvisHUD, UIEvent
@@ -87,6 +88,9 @@ class JarvisApp:
                 tools=[types.Tool(function_declarations=get_tool_declarations())],
             ),
         )
+
+        # ── Router ───────────────────────────────────────────────────────────
+        self.router = Router()
 
         # ── Speech ────────────────────────────────────────────────────────────
         self.stt = SpeechToText(model=cfg.stt_model, language=cfg.stt_language)
@@ -263,6 +267,18 @@ class JarvisApp:
         return text
 
     def _think(self, user_text: str) -> str:
+        """
+        Send user text to Gemini to decide intent and tool selection.
+        Gemini always decides WHAT to do — the router decides WHERE to run it.
+
+        Flow:
+          1. Gemini receives the query and returns either a tool call or text
+          2. If tool call → router checks routing flag
+             - "local"  → Ollama executes the tool
+             - "cloud"  → Gemini executes the tool (existing path)
+          3. Result sent back to Gemini for a natural spoken reply
+          4. Memory saved after every turn
+        """
         self._post("status", "thinking")
         print("Jarvis: ", end="", flush=True)
 
@@ -274,42 +290,127 @@ class JarvisApp:
 
         for part in response.candidates[0].content.parts:
             if part.function_call:
-                fn     = part.function_call
-                result = run_tool(fn.name, dict(fn.args))
-                print(f"[tool:{fn.name}] {result}")
-                self._post("tool", f"{fn.name} → {result}")
+                fn        = part.function_call
+                tool_name = fn.name
+                tool_args = dict(fn.args)
 
-                from tools.screen import get_pending_screenshot, clear_pending_screenshot
-                screenshot_b64 = get_pending_screenshot()
-
-                if screenshot_b64:
-                    clear_pending_screenshot()
-                    print("[Vision] Screenshot captured, routing to Ollama...")
-                    spoken = self._ask_with_image(user_text, screenshot_b64)
-                else:
-                    tool_response = self.chat.send_message(
-                        types.Part.from_function_response(
-                            name=fn.name,
-                            response={"result": result},
-                        )
+                # ── Route decision ────────────────────────────────────────────
+                if self.router.is_local(tool_name):
+                    print(f"[tool:{tool_name}] → Ollama (local)")
+                    spoken = self._run_local_tool(
+                        tool_name, tool_args, user_text
                     )
-                    spoken = (tool_response.text or "").strip()
+                else:
+                    print(f"[tool:{tool_name}] → Gemini (cloud)")
+                    spoken = self._run_cloud_tool(
+                        tool_name, tool_args
+                    )
 
                 print(spoken)
                 self._post("response", spoken)
-                self.memory.save_turn("user",   user_text)
-                self.memory.save_turn("jarvis", spoken)
-                self.memory.process_turn(user_text, spoken)
+                self._post("tool", f"{tool_name} → {spoken[:60]}")
+                self._save_to_memory(user_text, spoken)
                 return spoken
 
+        # ── Plain text response — always Gemini ───────────────────────────────
         spoken = (response.text or "").strip()
         print(spoken)
         self._post("response", spoken)
         self._post("tool", "—")
+        self._save_to_memory(user_text, spoken)
+        return spoken
+
+    def _run_local_tool(
+        self, tool_name: str, tool_args: dict, user_text: str
+    ) -> str:
+        """
+        Execute a local-routed tool via smart formatting.
+
+        Strategy:
+          - Simple tools (get_time, get_battery, etc.) → format directly (instant)
+          - Complex tools (capture_screen) → use Ollama for intelligent reply
+          - All tools execute locally (not sent to Gemini) → privacy preserved
+
+        Falls back gracefully if Ollama is unavailable.
+        """
+        from tools.screen import get_pending_screenshot, clear_pending_screenshot
+        from tools import run_tool
+        from llm.ollama_client import call_with_tool
+        from llm.formatters import should_format_directly, format_response
+
+        # Run the tool handler first (this populates screenshot buffer if needed)
+        result = run_tool(tool_name, tool_args)
+        print(f"  result: {result}")
+        self._post("tool", f"{tool_name} → {result}")
+
+        # Screen analysis — hand off to Ollama vision
+        screenshot_b64 = get_pending_screenshot()
+        if screenshot_b64:
+            clear_pending_screenshot()
+            print("[Vision] Routing screenshot to Ollama vision...")
+            return self._ask_with_image(user_text, screenshot_b64)
+
+        # Try direct formatting for simple, deterministic tools
+        if should_format_directly(tool_name):
+            formatted = format_response(tool_name, result)
+            if formatted:
+                print(f"  [Direct format] {formatted}")
+                return formatted
+
+        # For complex tools, ask Ollama to form a spoken reply from the result
+        # Falls back to Gemini if Ollama unavailable.
+        tool_name_out, text, _ = call_with_tool(
+            model=self.cfg.ollama_text_model,
+            user_text=(
+                f"The user asked: '{user_text}'. "
+                f"The tool '{tool_name}' returned: '{result}'. "
+                f"Give a short, natural spoken reply in Jarvis's voice — "
+                f"under 20 words, dry and direct."
+            ),
+            system_prompt=self.cfg.system_instruction,
+            declarations=[],  # no tools needed for reply generation
+            host=self.cfg.ollama_host,
+        )
+
+        if text:
+            return text
+
+        # Ollama unavailable — fall back to Gemini for the reply
+        print("[Router] Ollama unavailable for reply — falling back to Gemini.")
+        return self._run_cloud_tool_reply(tool_name, result)
+
+    def _run_cloud_tool(self, tool_name: str, tool_args: dict) -> str:
+        """
+        Execute a cloud-routed tool via Gemini's existing function call path.
+        """
+        result = run_tool(tool_name, tool_args)
+        print(f"  result: {result}")
+        self._post("tool", f"{tool_name} → {result}")
+
+        return self._run_cloud_tool_reply(tool_name, result)
+
+    def _run_cloud_tool_reply(self, tool_name: str, result: str) -> str:
+        """
+        Send a tool result back to Gemini and get a natural spoken reply.
+        Used by both the cloud tool path and as fallback for local tools.
+        """
+        try:
+            tool_response = self.chat.send_message(
+                types.Part.from_function_response(
+                    name=tool_name,
+                    response={"result": result},
+                )
+            )
+            return (tool_response.text or "").strip()
+        except Exception as e:
+            print(f"[Gemini reply error: {e}]", file=sys.stderr)
+            return result  # worst case, just speak the raw result
+
+    def _save_to_memory(self, user_text: str, spoken: str) -> None:
+        """Save user and assistant turn to memory."""
         self.memory.save_turn("user",   user_text)
         self.memory.save_turn("jarvis", spoken)
         self.memory.process_turn(user_text, spoken)
-        return spoken
 
     def _ask_with_image(self, user_text: str, image_b64: str) -> str:
         try:
