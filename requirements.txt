@@ -1,0 +1,11 @@
+python-dotenv
+pytest
+pytest-cov
+pytest-mock
+anyio
+RealtimeSTT
+elevenlabs
+ollama
+black
+ruff
+mypy

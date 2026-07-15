@@ -101,13 +101,13 @@ def call_with_tool(
         return None, text, None
 
     except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
         err = str(e).lower()
         if "connection" in err or "refused" in err:
-            print(
-                f"[Ollama] Not reachable — falling back to Gemini. "
-                f"(Is Ollama running? Try: ollama serve)",
-                file=sys.stderr,
+            logger.warning(
+                "[Ollama] Not reachable — falling back to Gemini. (Is Ollama running? Try: ollama serve)"
             )
         else:
-            print(f"[Ollama] Error: {e} — falling back to Gemini.", file=sys.stderr)
+            logger.exception(f"[Ollama] Error: {e} — falling back to Gemini.")
         return None, None, None
